@@ -1,0 +1,4 @@
+jmddns
+!*jmddns/
+.env
+.env.*
