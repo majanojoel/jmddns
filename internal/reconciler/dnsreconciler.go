@@ -1,9 +1,13 @@
 package reconciler
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"log"
 	"time"
+
+	"github.com/cloudflare/cloudflare-go"
 )
 
 const (
@@ -21,18 +25,23 @@ type (
 	DNSRecordReconciler struct {
 		cachedIPAddress string
 		ipProvider      ExternalIPProvider
-		quitCh          chan struct{}
+		// TODO: This should be an interface, but for now just use the API directly.
+		zoneID string
+		cfAPI  *cloudflare.API
+		quitCh chan struct{}
 	}
 )
 
-func NewDNSRecordReconciler(ipProvider ExternalIPProvider) (*DNSRecordReconciler, error) {
+func NewDNSRecordReconciler(ipProvider ExternalIPProvider, cfAPI *cloudflare.API, zoneID string) (*DNSRecordReconciler, error) {
 	if ipProvider == nil {
 		return nil, ErrNilArgument
 	}
 	r := &DNSRecordReconciler{
 		ipProvider:      ipProvider,
+		cfAPI:           cfAPI,
 		quitCh:          make(chan struct{}),
 		cachedIPAddress: "",
+		zoneID:          zoneID,
 	}
 	return r, nil
 }
@@ -53,7 +62,15 @@ func (r *DNSRecordReconciler) RunIPReconcileLoop() error {
 	}
 }
 
+type (
+	dnsRecordInfo struct {
+		name string
+		id   string
+	}
+)
+
 func (r *DNSRecordReconciler) handleReconcile() error {
+	ctx := context.Background()
 	// Get the current IP address
 	ipAddress, err := r.ipProvider.GetExternalIP()
 	if err != nil {
@@ -67,11 +84,55 @@ func (r *DNSRecordReconciler) handleReconcile() error {
 		return nil
 	}
 	// Get the current DNS record values
+	rc := cloudflare.ZoneIdentifier(r.zoneID)
+	params := cloudflare.ListDNSRecordsParams{}
+	dnsRecords, _, err := r.cfAPI.ListDNSRecords(ctx, rc, params)
+	if err != nil {
+		return fmt.Errorf("(*cloudflare.API).ListDNSRecords: %w", err)
+	}
+	needToUpdateRecordInfos := make([]dnsRecordInfo, 0)
 	// Compare dns record IP address to the current IP address
-
+	for _, dnsr := range dnsRecords {
+		// We will only reconcile A records.
+		if dnsr.Type != "A" {
+			continue
+		}
+		fmt.Println("DNSRecordReconciler: Handling record with ID", dnsr.ID)
+		if dnsr.Content != ipAddress {
+			info := dnsRecordInfo{
+				name: dnsr.Name,
+				id:   dnsr.ID,
+			}
+			needToUpdateRecordInfos = append(needToUpdateRecordInfos, info)
+		}
+	}
+	log.Printf("DNSRecordReconciler: Found %d records to update\n", len(needToUpdateRecordInfos))
 	// Make the changes to the DNS records
+	allUpdated := true
+	for _, dnsrToUpdate := range needToUpdateRecordInfos {
+		comment := fmt.Sprintf("This record was updated by the jmddns service at %s",
+			time.Now().UTC().String())
+		rc := cloudflare.ZoneIdentifier(r.zoneID)
+		updateParams := cloudflare.UpdateDNSRecordParams{
+			Type:    "A",
+			Name:    dnsrToUpdate.name,
+			ID:      dnsrToUpdate.id,
+			Content: ipAddress,
+			Comment: &comment,
+		}
+		if _, err := r.cfAPI.UpdateDNSRecord(ctx, rc, updateParams); err != nil {
+			log.Println("DNSRecordReconciler: Failed to update record", dnsrToUpdate)
+			if !allUpdated {
+				allUpdated = false
+			}
+			continue
+		}
+		log.Println("DNSRecordReconciler: Updated record with ID", dnsrToUpdate.id)
+	}
 	// Update our cached value ONLY if the DNS record was updated successfully.
-	r.cachedIPAddress = ipAddress
+	if allUpdated {
+		r.cachedIPAddress = ipAddress
+	}
 	return nil
 }
 
