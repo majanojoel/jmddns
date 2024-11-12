@@ -19,8 +19,9 @@ type (
 		GetExternalIP() (string, error)
 	}
 	DNSRecordReconciler struct {
-		ipProvider ExternalIPProvider
-		quitCh     chan struct{}
+		cachedIPAddress string
+		ipProvider      ExternalIPProvider
+		quitCh          chan struct{}
 	}
 )
 
@@ -29,8 +30,9 @@ func NewDNSRecordReconciler(ipProvider ExternalIPProvider) (*DNSRecordReconciler
 		return nil, ErrNilArgument
 	}
 	r := &DNSRecordReconciler{
-		ipProvider: ipProvider,
-		quitCh:     make(chan struct{}),
+		ipProvider:      ipProvider,
+		quitCh:          make(chan struct{}),
+		cachedIPAddress: "",
 	}
 	return r, nil
 }
@@ -52,8 +54,6 @@ func (r *DNSRecordReconciler) RunIPReconcileLoop() error {
 }
 
 func (r *DNSRecordReconciler) handleReconcile() error {
-	// Get the current DNS record values
-
 	// Get the current IP address
 	ipAddress, err := r.ipProvider.GetExternalIP()
 	if err != nil {
@@ -62,10 +62,16 @@ func (r *DNSRecordReconciler) handleReconcile() error {
 		return nil
 	}
 	log.Println("DNSRecordReconciler: Retrieved external IP address", ipAddress)
+	if ipAddress == r.cachedIPAddress {
+		log.Println("DNSRecordReconciler: Cached IP address match, nothing to do.")
+		return nil
+	}
+	// Get the current DNS record values
 	// Compare dns record IP address to the current IP address
-	// If not different, exit the loop.
 
 	// Make the changes to the DNS records
+	// Update our cached value ONLY if the DNS record was updated successfully.
+	r.cachedIPAddress = ipAddress
 	return nil
 }
 
